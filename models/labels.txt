@@ -1,0 +1,3 @@
+0  fall
+1  walking
+2  sitting

@@ -3,6 +3,35 @@
 """
 import cv2
 import numpy as np
+import re
+import tensorflow as tf
+
+def read_label_file(file_path):
+    """Reads labels from a text file and returns it as a dictionary.
+
+    This function supports label files with the following formats:
+
+    + Each line contains id and description separated by colon or space.
+        Example: ``0:cat`` or ``0 cat``.
+    + Each line contains a description only. The returned label id's are based on
+        the row number.
+
+    Args:
+        file_path (str): path to the label file.
+
+    Returns:
+        Dict of (int, string) which maps label id to description.
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    ret = {}
+    for row_number, content in enumerate(lines):
+        pair = re.split(r'[:\s]+', content.strip(), maxsplit=1)
+        if len(pair) == 2 and pair[0].strip().isdigit():
+           ret[int(pair[0])] = pair[1].strip()
+        else:
+           ret[row_number] = content.strip()
+    return ret
 
 def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
     # Resize and pad image while meeting stride-multiple constraints
@@ -16,7 +45,7 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
         r = min(r, 1.0)
 
     # Compute padding
-    ratio = r, r  # width, height ratios
+    ratio = r, r  # width, height ratios 
     new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
     dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
     if auto:  # minimum rectangle
@@ -34,19 +63,23 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
     im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+
     return im, ratio, (dw, dh)
 
 
 def inference_int8(interpreter, im):
-    input = interpreter.get_input_details()
-    output = interpreter.get_output_details()
+    input = interpreter.get_input_details()[0]
+    output = interpreter.get_output_details()[0]
     scale, zero_point = input['quantization']
     
-    im = im.float()  # uint8 to fp16/32
+    im = im.astype(np.float32)  # uint8 to fp16/32
     im /= 255
     if len(im.shape) == 3:
         im = im[None]  # expand for batch dim
     b, ch, h, w = im.shape
+    
+    if True:
+        im = im.transpose(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
         
     im = (im / scale + zero_point).astype(np.uint8)  # de-scale
     interpreter.set_tensor(input['index'], im)
@@ -57,7 +90,7 @@ def inference_int8(interpreter, im):
     x = (x.astype(np.float32) - zero_point) * scale  # re-scale
 
     # y = [x if isinstance(x, np.ndarray) else x.numpy()]
-    y = [x]
+    y = x[None]
     y[0][..., :4] *= [w, h, w, h]  # xywh normalized to pixels
     
     return y
@@ -85,7 +118,7 @@ def non_max_suppression(
     # redundant = True  # require redundant detections
 
     # t = time.time()
-    output = [] * bs
+    output = [np.zeros((0, 6))] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         x = x[xc[xi]]  # confidence
 
@@ -101,18 +134,20 @@ def non_max_suppression(
 
         # Detections matrix nx6 (xyxy, conf, cls)
         # best class only
-        conf, j = x[:, 5:].max(axis=1, keepdims=True)
-        x = np.concatenate((box, conf, j.float()), axis=1)[conf.squeeze() > conf_thres]
+        conf = x[:, 5:].max(axis=1, keepdims=True)
+        j = x[:, 5:].argmax(axis=1, keepdims=True)
+        x = np.concatenate((box, conf, j), axis=1)[conf.flatten() > conf_thres]  # j.astpye(np.float32)?
 
         # Check shape
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
-        x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+        x = x[x[:, 4].argsort()[::-1][:max_nms]]  # sort by confidence and remove excess boxes
 
         # Batched NMS - agnostic NMS!
         boxes, scores = x[:, :4], x[:, 4]  # boxes (agnostic), scores
-        i = _nms(boxes, scores, iou_thres)  # NMS
+        # i = _nms(boxes, scores, iou_thres)  # Manual implementation of NMS
+        i = tf.image.non_max_suppression(boxes, scores, max_output_size=max_det, iou_threshold=iou_thres)
         i = i[:max_det]  # limit detections
 
         output[xi] = x[i]
@@ -127,20 +162,20 @@ def _nms(dets, scores, iou_threshold):
    # scores: confidence score
 
    # 1. Get the index of bbox sorted by confidence score
-   order = scores.squeeze().argsort(descending=True)
+   order = scores.squeeze().argsort()[::-1]
 
    # 2. Calculate the bbox overlap
    keep = []
-   while order.size() > 0:
+   while order.size > 0:
        i = order[0]
        keep.append(i)
 
-       if order.size() == 1:
+       if order.size == 1:
            break
 
-       ovr = box_iou(dets[i], dets[order[1:]])
-       inds = np.nonzero(ovr <= iou_threshold).squeeze()
-       if inds.size() == 0:
+       ovr = box_iou(dets[i:i+1], dets[order[1:]])
+       inds = np.nonzero(ovr <= iou_threshold)[0] # squeeze
+       if inds.size == 0:
            break
        order = order[inds + 1]
    return np.array(keep)
@@ -154,10 +189,10 @@ def _box_inter_union(boxes1, boxes2):
     area1 = box_area(boxes1)
     area2 = box_area(boxes2)
 
-    lt = np.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = np.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
+    lt = np.maximum(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
+    rb = np.minimum(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
 
-    wh = np.clip(rb - lt, a_min=0)  # [N,M,2]
+    wh = np.maximum(rb - lt, 0)  # [N,M,2]
     inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
 
     union = area1[:, None] + area2 - inter
@@ -185,6 +220,73 @@ def xywh2xyxy(x):
     y[..., 2] = x[..., 0] + x[..., 2] / 2  # bottom right x
     y[..., 3] = x[..., 1] + x[..., 3] / 2  # bottom right y
     return y
+
+def postprocessing(prediction):
+    # prediction shape: batch, num_boxes, xyxy+conf+cls
+    output = prediction[0]
+    
+    # xyxy, conf, cls, count
+    detection_box = output[..., :4]
+    cls_conf = output[..., 4:5]
+    cls_id = output[..., 5:]
+    count = output.shape[0]
+    
+    if count == 0:
+        return np.empty((0, 6))
+    # 
+    output = []
+    for i in range(count):   
+        x1, y1, x2, y2 = detection_box[i]
+        score = float(cls_conf[i])
+        id = float(cls_id[i])
+        output.append(np.array([x1, y1, x2, y2, score, id]))
+        
+    return np.stack(output)
+
+def append_objs_to_img(im, inference_size, trks, labels, track=True):
+                    # Rescale boxes from img_size to im0 size
+    trks[:, :4] = scale_boxes(inference_size, trks[:, :4], im.shape).round()
+    # h, w, ch = im.shape
+    # sx, sy = w / inference_size[0], h / inference_size[1]
+    
+    for trk in trks:
+        # x0, y0 = int(sx * trk[0]), int(sy * trk[1])
+        # x1, y1 = int(sx * trk[2]), int(sy * trk[3])
+        x0, y0 = int(trk[0]), int(trk[1])
+        x1, y1 = int(trk[2]), int(trk[3])
+        percent = int(100 * trk[4])
+        cls = labels.get(trk[5], trk[5])
+        if track:
+            id = int(trk[6])
+            label = f'{percent}% {cls} ID:{id}'
+        else:
+            label = f'{percent}% {cls}'
+            
+        im = cv2.rectangle(im, (x0, y0), (x1, y1), (0, 255, 0), 2)
+        im = cv2.putText(im, label, (x0, y0+30),
+                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 2)
+            
+    return im
+
+def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None):
+    # Rescale boxes (xyxy) from img1_shape to img0_shape
+    if ratio_pad is None:  # calculate from img0_shape
+        gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
+        pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (img1_shape[0] - img0_shape[0] * gain) / 2  # wh padding
+    else:
+        gain = ratio_pad[0][0]
+        pad = ratio_pad[1]
+
+    boxes[..., [0, 2]] -= pad[0]  # x padding
+    boxes[..., [1, 3]] -= pad[1]  # y padding
+    boxes[..., :4] /= gain
+    clip_boxes(boxes, img0_shape)
+    return boxes
+
+def clip_boxes(boxes, shape):
+    # Clip boxes (xyxy) to image shape (height, width)
+    boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
+    boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
 
 def _upcast(t):
     # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type

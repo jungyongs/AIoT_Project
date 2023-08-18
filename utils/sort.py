@@ -121,8 +121,8 @@ class KalmanBoxTracker(object):
     self.age = 0
     
     # Modified Properties
-    self.score = bbox[5] # confidence score
-    self.cls = bbox[6] # class ID
+    self.score = bbox[4] # confidence score
+    self.cls = bbox[5] # class ID
 
   def update(self,bbox):
     """
@@ -132,6 +132,10 @@ class KalmanBoxTracker(object):
     self.history = []
     self.hits += 1
     self.hit_streak += 1
+    
+    self.score = bbox[4]
+    self.cls = bbox[5]
+  
     self.kf.update(convert_bbox_to_z(bbox))
 
   def predict(self):
@@ -237,7 +241,7 @@ class Sort(object):
     trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
     for t in reversed(to_del):
       self.trackers.pop(t)
-    matched, unmatched_dets, unmatched_trks = associate_detections_to_trackers(dets,trks, self.iou_threshold)
+    matched, unmatched_dets, unmatched_trks = associate_detections_to_trackers(dets, trks, self.iou_threshold)
 
     # update matched trackers with assigned detections
     for m in matched:
