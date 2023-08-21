@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import re
 import tensorflow as tf
+import time
 
 def read_label_file(file_path):
     """Reads labels from a text file and returns it as a dictionary.
@@ -243,7 +244,7 @@ def postprocessing(prediction):
         
     return np.stack(output)
 
-def append_objs_to_img(im, inference_size, trks, labels, track=True):
+def append_objs_to_img(im, inference_size, trks, labels, notrack=False):
                     # Rescale boxes from img_size to im0 size
     trks[:, :4] = scale_boxes(inference_size, trks[:, :4], im.shape).round()
     # h, w, ch = im.shape
@@ -256,7 +257,7 @@ def append_objs_to_img(im, inference_size, trks, labels, track=True):
         x1, y1 = int(trk[2]), int(trk[3])
         percent = int(100 * trk[4])
         cls = labels.get(trk[5], trk[5])
-        if track:
+        if not notrack:
             id = int(trk[6])
             label = f'{percent}% {cls} ID:{id}'
         else:
@@ -288,9 +289,24 @@ def clip_boxes(boxes, shape):
     boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
     boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
 
-def _upcast(t):
-    # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type
-    if t.is_floating_point():
-        return t if t.dtype in (torch.float32, torch.float64) else t.float()
-    else:
-        return t if t.dtype in (torch.int32, torch.int64) else t.int()
+# def _upcast(t):
+#     # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type
+#     if t.is_floating_point():
+#         return t if t.dtype in (torch.float32, torch.float64) else t.float()
+#     else:
+#         return t if t.dtype in (torch.int32, torch.int64) else t.int()
+    
+class Timer():
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __enter__(self):
+        self.start = self.time()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.dt = self.time() - self.start  # delta-time
+        self.t += self.dt  # accumulate dt
+
+    def time(self):
+        return time.time()
