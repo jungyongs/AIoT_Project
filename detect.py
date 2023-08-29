@@ -23,14 +23,17 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from utils.utils import read_label_file, letterbox, inference_int8, non_max_suppression, postprocessing, append_objs_to_img, Timer
+from utils.utils import read_label_file, letterbox, inference_int8, non_max_suppression, postprocessing, append_objs_to_img, Timer, scale_boxes
 from utils.sort import Sort
+from utils.pose import append_poses_to_img, imgToPose, poseToAngle
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # Root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
+
+FALL = 0
 
 def run(model=ROOT / 'models/best-int8.tflite',  # model path
         source=ROOT / 'data/sample.mp4',  # input video path
@@ -40,10 +43,8 @@ def run(model=ROOT / 'models/best-int8.tflite',  # model path
         max_det=1000,  # maximum detections per image
         device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
         save_dir=ROOT / 'out',
-        notrack=False,
         length=0,
         stream=False,
-        exist_ok=False,  # existing project/name ok, do not increment
         line_thickness=3,  # bounding box thickness (pixels)
         hide_labels=False,  # hide labels
         hide_conf=False,  # hide confidences
@@ -78,7 +79,7 @@ def run(model=ROOT / 'models/best-int8.tflite',  # model path
         else:
             print(f"Cannot open file {source}")
             return 1
-
+        
     # Set the videowriter with mp4 codec
     if webcam:
         save_path = str(save_dir / 'out.mp4')
@@ -98,11 +99,31 @@ def run(model=ROOT / 'models/best-int8.tflite',  # model path
         frames = int(fps * length)
     frames0 = frames # copy to calculate proportion
 
-    # Initialize SORT isntance    
+    # Initialize SORT instance    
     mot_tracker = Sort(max_age=1, min_hits=3, iou_threshold=0.3)
     
+    # Set object dict
+    objects = {}
+    
+    # Load pose estimation model (MoveNet)
+    model_path="models/lite-model_movenet_singlepose_lightning_tflite_int8_4.tflite"
+    input_size = 192 # (192, 192)
+    interpreter2 = tf.lite.Interpreter(model_path=model_path)
+    interpreter2.allocate_tensors()
+    
+    # Load LSTM model
+    RNN_model = tf.keras.models.load_model('models/action.h5') #'C:/archive/action.h5'
+    falls = {}
+    if fps >= 30:
+        interval_rev = False
+        interval = int(fps/30)
+    else:
+        interval_rev = True
+        interval = int(30/fps)
+    counter = interval
+    
     # Set timer
-    dt = [Timer(), Timer(), Timer(), Timer()]
+    dt = [Timer(), Timer(), Timer(), Timer(), Timer(), Timer()]
     
     # Run the loop by each frame
     while cap.isOpened() and frames > 0:
@@ -129,13 +150,63 @@ def run(model=ROOT / 'models/best-int8.tflite',  # model path
     
         with dt[3]:
             # Add tracker ID
-            if not notrack:
-                trks = mot_tracker.update(objs)
-            else:
-                trks = objs
+            trks = mot_tracker.update(objs)
+            # output format: [[x1,y1,x2,y2,score,cls,id],[x1,y1,x2,y2,score,cls,id],...]
+                
+        poses = []
+        with dt[4]:
+            active_ids = trks[:, 6]
+            fall_trks = trks[trks[:,5] == FALL] # Pose estimation only for objects with cls == FALL
+            for trk in fall_trks:
+                # Pose estimation for each bounding box
+                x1, y1, x2, y2, id = int(trk[0]), int(trk[1]), int(trk[2]), int(trk[3]), int(trk[6])
+                cropped_img = im[:, y1:(y2), x1:(x2)]
+                pose = imgToPose(cropped_img, interpreter2)
+                # Feature extraction (9 angles)
+                angle = poseToAngle(pose)
+                
+                # Calculate pose coords in original img for future reference (drawing)
+                x1, y1, x2, y2 = scale_boxes(inference_size, trk[:4][None], (frame_height, frame_width))[0].round()
+                pose[0][0][:, 0] = (pose[0][0][:, 0] * (y2-y1) + y1) / frame_height
+                pose[0][0][:, 1] = (pose[0][0][:, 1] * (x2-x1) + x1) / frame_width
+                
+                # Stack feature data by required number of frames
+                if id in objects:
+                    if not interval_rev and counter==interval: # if fps is n times higher than 30, append once every n frames.
+                        objects[id].append(angle)
+                        counter -= 1
+                        if counter == 0:
+                            counter = interval
+                    elif interval_rev: # if fps is n times lower than 30, append n times every frame.
+                        for _ in range(interval):
+                            objects[id].append(angle)
+                else:
+                    objects[id] = [angle]
+                    
+            for id, obj in objects.items():
+                # LSTM inference with 60 sequence of features (approx 2 secs)
+                if len(obj) == 60:
+                    obj = np.array(obj)
+                    obj = obj[None]
+                    fall = RNN_model.predict(obj)[0][1] > 0.5
+                    falls[id] = fall
+                    print(f"{id}: {fall}")
+                    objects[id] = [] # Reset feature sequence for ID
 
-        # Draw boxes to image
-        im0 = append_objs_to_img(im0, inference_size, trks, labels, notrack)
+        with dt[5]:
+            # Draw boxes to image
+            im0 = append_objs_to_img(im0, inference_size, trks, labels)
+            
+            # Draw poses to image
+            for pose in poses:
+                im0 = append_poses_to_img(im0, pose)
+            
+            # Draw fall ID
+            i = 0
+            for id, fall in falls.items():
+                if fall:
+                    im0 = cv2.putText(im0, f"{id}: Fall", (30, 30 + i), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                    i += 30
 
         # Write to video
         out.write(im0)
@@ -154,7 +225,7 @@ def run(model=ROOT / 'models/best-int8.tflite',  # model path
             break
 
     t = tuple(x.t / frames0 * 1E3 for x in dt)  # speeds per frame
-    print('Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, and %.1fms tracking per frame' % t)
+    print('Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms tracking, %.1fms action rec, and %.1f drawing per frame' % t)
     cap.release()
     cv2.destroyAllWindows()
 
@@ -168,7 +239,6 @@ def parse_opt():
     parser.add_argument('--max_det', default=1000, type=int, help='number of categories with highest score to display')
     parser.add_argument('--save_dir', default=ROOT / 'out', help='output video directory')
     parser.add_argument('--length', default=0, type=int, help='Specify the length of video')
-    parser.add_argument('--notrack', action='store_true', help='detect without SORT tracker')
     parser.add_argument('--stream', action='store_true', help='stream to window')
     opt = parser.parse_args()
     return opt

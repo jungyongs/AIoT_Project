@@ -263,9 +263,13 @@ def append_objs_to_img(im, inference_size, trks, labels, notrack=False):
         else:
             label = f'{percent}% {cls}'
             
-        im = cv2.rectangle(im, (x0, y0), (x1, y1), (0, 255, 0), 2)
-        im = cv2.putText(im, label, (x0, y0+30),
-                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 2)
+        if cls == 'fall':
+            color = (0, 0, 255)
+        else:
+            color = (55, 255, 55)
+        im = cv2.rectangle(im, (x0, y0), (x1, y1), color, 2)
+        im = cv2.putText(im, label, (x0+2, y0+12),
+                             cv2.FONT_HERSHEY_PLAIN, 0.8, (255, 55, 55), 1)
             
     return im
 
