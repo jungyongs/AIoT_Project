@@ -169,6 +169,7 @@ def run(model=ROOT / 'models/best-int8.tflite',  # model path
                 x1, y1, x2, y2 = scale_boxes(inference_size, trk[:4][None], (frame_height, frame_width))[0].round()
                 pose[0][0][:, 0] = (pose[0][0][:, 0] * (y2-y1) + y1) / frame_height
                 pose[0][0][:, 1] = (pose[0][0][:, 1] * (x2-x1) + x1) / frame_width
+                poses.append(pose)
                 
                 # Stack feature data by required number of frames
                 if id in objects:
