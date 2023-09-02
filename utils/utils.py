@@ -1,4 +1,4 @@
-""" Utility functions for main.py
+""" Utility functions for detect.py
 
 """
 import cv2
@@ -7,11 +7,29 @@ import re
 import tensorflow as tf
 import time
 
+def inference_person(interpreter, img):
+    img  = cv2.resize(img, (224, 224))[None]
+    
+    input = interpreter.get_input_details()[0]
+    output = interpreter.get_output_details()[0]
+    scale, zero_point = input['quantization']
+
+    img = (img / scale + zero_point).astype(np.uint8)  # de-scale
+    interpreter.set_tensor(input['index'], img)
+    interpreter.invoke()
+
+    x = interpreter.get_tensor(output['index'])
+    scale, zero_point = output['quantization']
+    x = (x.astype(np.float32) - zero_point) * scale  # re-scale
+    
+    person = x < ((127 - zero_point) * scale)
+    
+    return person
+
 def read_label_file(file_path):
     """Reads labels from a text file and returns it as a dictionary.
 
     This function supports label files with the following formats:
-
     + Each line contains id and description separated by colon or space.
         Example: ``0:cat`` or ``0 cat``.
     + Each line contains a description only. The returned label id's are based on
@@ -77,11 +95,8 @@ def inference_int8(interpreter, im):
     im /= 255
     if len(im.shape) == 3:
         im = im[None]  # expand for batch dim
-    b, ch, h, w = im.shape
-    
-    if True:
-        im = im.transpose(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
-        
+    b, h, w, ch = im.shape
+            
     im = (im / scale + zero_point).astype(np.uint8)  # de-scale
     interpreter.set_tensor(input['index'], im)
     interpreter.invoke()
@@ -90,7 +105,6 @@ def inference_int8(interpreter, im):
     scale, zero_point = output['quantization']
     x = (x.astype(np.float32) - zero_point) * scale  # re-scale
 
-    # y = [x if isinstance(x, np.ndarray) else x.numpy()]
     y = x[None]
     y[0][..., :4] *= [w, h, w, h]  # xywh normalized to pixels
     
@@ -115,10 +129,7 @@ def non_max_suppression(
     # Settings
     max_wh = 7680  # (pixels) maximum box width and height
     max_nms = 30000  # maximum number of boxes into torchvision.ops.nms()
-    # time_limit = 0.5 + 0.05 * bs  # seconds to quit after
-    # redundant = True  # require redundant detections
 
-    # t = time.time()
     output = [np.zeros((0, 6))] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         x = x[xc[xi]]  # confidence
@@ -130,7 +141,7 @@ def non_max_suppression(
         # Compute conf
         x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
 
-        # Box/Mask
+        # Box/(Mask)
         box = xywh2xyxy(x[:, :4])  # center_x, center_y, width, height) to (x1, y1, x2, y2)
 
         # Detections matrix nx6 (xyxy, conf, cls)
@@ -152,57 +163,8 @@ def non_max_suppression(
         i = i[:max_det]  # limit detections
 
         output[xi] = x[i]
-        # if (time.time() - t) > time_limit:
-        #     LOGGER.warning(f'WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded')
-        #     break  # time limit exceeded
 
     return output
-
-def _nms(dets, scores, iou_threshold):
-   # dets: xyxy
-   # scores: confidence score
-
-   # 1. Get the index of bbox sorted by confidence score
-   order = scores.squeeze().argsort()[::-1]
-
-   # 2. Calculate the bbox overlap
-   keep = []
-   while order.size > 0:
-       i = order[0]
-       keep.append(i)
-
-       if order.size == 1:
-           break
-
-       ovr = box_iou(dets[i:i+1], dets[order[1:]])
-       inds = np.nonzero(ovr <= iou_threshold)[0] # squeeze
-       if inds.size == 0:
-           break
-       order = order[inds + 1]
-   return np.array(keep)
-
-def box_iou(boxes1, boxes2):
-    inter, union = _box_inter_union(boxes1, boxes2)
-    iou = inter / union
-    return iou
-
-def _box_inter_union(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
-
-    lt = np.maximum(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = np.minimum(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-
-    wh = np.maximum(rb - lt, 0)  # [N,M,2]
-    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
-
-    union = area1[:, None] + area2 - inter
-
-    return inter, union
-
-def box_area(boxes):
-    # boxes = _upcast(boxes)
-    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
 def xyxy2xywh(x):
     # Convert nx4 boxes from [x1, y1, x2, y2] to [x, y, w, h] where xy1=top-left, xy2=bottom-right
@@ -245,7 +207,7 @@ def postprocessing(prediction):
     return np.stack(output)
 
 def append_objs_to_img(im, inference_size, trks, labels, notrack=False):
-                    # Rescale boxes from img_size to im0 size
+    # Rescale boxes from img_size to im0 size
     trks[:, :4] = scale_boxes(inference_size, trks[:, :4], im.shape).round()
     # h, w, ch = im.shape
     # sx, sy = w / inference_size[0], h / inference_size[1]
@@ -293,13 +255,7 @@ def clip_boxes(boxes, shape):
     boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
     boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
 
-# def _upcast(t):
-#     # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type
-#     if t.is_floating_point():
-#         return t if t.dtype in (torch.float32, torch.float64) else t.float()
-#     else:
-#         return t if t.dtype in (torch.int32, torch.int64) else t.int()
-    
+
 class Timer():
     def __init__(self, t=0.0):
         self.t = t
@@ -314,3 +270,59 @@ class Timer():
 
     def time(self):
         return time.time()
+    
+    
+"""
+def _nms(dets, scores, iou_threshold):
+   # dets: xyxy
+   # scores: confidence score
+
+   # 1. Get the index of bbox sorted by confidence score
+   order = scores.squeeze().argsort()[::-1]
+
+   # 2. Calculate the bbox overlap
+   keep = []
+   while order.size > 0:
+       i = order[0]
+       keep.append(i)
+
+       if order.size == 1:
+           break
+
+       ovr = box_iou(dets[i:i+1], dets[order[1:]])
+       inds = np.nonzero(ovr <= iou_threshold)[0] # squeeze
+       if inds.size == 0:
+           break
+       order = order[inds + 1]
+   return np.array(keep)
+
+def box_iou(boxes1, boxes2):
+    inter, union = _box_inter_union(boxes1, boxes2)
+    iou = inter / union
+    return iou
+
+def _box_inter_union(boxes1, boxes2):
+    area1 = box_area(boxes1)
+    area2 = box_area(boxes2)
+
+    lt = np.maximum(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
+    rb = np.minimum(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
+
+    wh = np.maximum(rb - lt, 0)  # [N,M,2]
+    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+
+    union = area1[:, None] + area2 - inter
+
+    return inter, union
+
+def box_area(boxes):
+    # boxes = _upcast(boxes)
+    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])    
+    
+# def _upcast(t):
+#     # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type
+#     if t.is_floating_point():
+#         return t if t.dtype in (torch.float32, torch.float64) else t.float()
+#     else:
+#         return t if t.dtype in (torch.int32, torch.int64) else t.int()
+"""

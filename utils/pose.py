@@ -1,11 +1,9 @@
+""" Functions for pose estimation & action recognition
+
+"""
 import cv2
 import numpy as np
-import re
 import tensorflow as tf
-import time
-from matplotlib import pyplot as plt
-from matplotlib.collections import LineCollection
-import matplotlib.patches as patches
 
 KEYPOINT_DICT = {
     'nose': 0,
@@ -52,9 +50,7 @@ KEYPOINT_EDGE_INDS_TO_COLOR = {
     (14, 16): C
 }
 
-def append_poses_to_img(
-        im, keypoints_with_scores, crop_region=None, close_figure=False,
-        output_image_height=None):
+def append_poses_to_img(im, keypoints_with_scores):
     """Draws the keypoint predictions on image.
 
     Args:
@@ -62,8 +58,6 @@ def append_poses_to_img(
         pixel values of the input image.
         keypoints_with_scores: A numpy array with shape [1, 1, 17, 3] representing
         the keypoint coordinates and scores returned from the MoveNet model.
-        output_image_height: An integer indicating the height of the output image.
-        Note that the image aspect ratio will be the same as the input image.
 
     Returns:
         A numpy array with shape [out_height, out_width, channel] representing the
@@ -77,8 +71,6 @@ def append_poses_to_img(
         cv2.line(im, tuple(edge[0]), tuple(edge[1]), color, 2)
     for loc in keypoint_locs:
         cv2.circle(im, tuple(loc), 3, (255, 20, 147), -1)
-
-    # im = np.ascontiguousarray(im, dtype=np.uint8)
     
     return im
 
@@ -149,29 +141,28 @@ def movenet(input_image, interpreter):
     A [1, 1, 17, 3] float numpy array representing the predicted keypoint
     coordinates and scores.
     """
-    # TF Lite format expects tensor type of uint8.
-    input_image = tf.cast(input_image, dtype=tf.uint8)
+    # Assert tensor type of uint8
+    input_image = tf.cast(input_image, dtype=tf.uint8) 
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
     interpreter.set_tensor(input_details[0]['index'], input_image.numpy())
-    # Invoke inference.
+    # Invoke inference
     interpreter.invoke()
-    # Get the model prediction.
+    # Get the model prediction
     keypoints_with_scores = interpreter.get_tensor(output_details[0]['index'])
+    
     return keypoints_with_scores
 
-def imgToPose(im, interpreter):
-    input_size = 192 # (192, 192)
-    im = im.transpose((1, 2, 0)) # chw to hwc
-        
+def imgToPose(im, interpreter, input_size=(192, 192)):
+    input_height, input_width = input_size
+    
     # image resize to input_size
     im = tf.expand_dims(im, axis=0)
-    im = tf.image.resize_with_pad(im, input_size, input_size)
+    im = tf.image.resize_with_pad(im, input_height, input_width)
     
-    # Process the im to get pose coordinates using your model
+    # Process the im to get pose coordinates
     pose_coordinates = movenet(im, interpreter)  # (1, 1, 17, 3)
     
-    # Write pose coordinates to the output file
     return pose_coordinates
 
 
@@ -231,64 +222,17 @@ def poseToAngle(coords):
 
     return angles
 
+def RNN_model(interpreter, obj):
+    input = interpreter.get_input_details()[0]
+    output = interpreter.get_output_details()[0]
+    scale, zero_point = input['quantization']
 
-# def draw_prediction_on_image(
-#         image, keypoints_with_scores, crop_region=None, close_figure=False,
-#         output_image_height=None):
-#     """Draws the keypoint predictions on image.
+    obj = (obj / scale + zero_point).astype(np.uint8)  # de-scale
+    interpreter.set_tensor(input['index'], obj)
+    interpreter.invoke()
 
-#     Args:
-#         image: A numpy array with shape [height, width, channel] representing the
-#         pixel values of the input image.
-#         keypoints_with_scores: A numpy array with shape [1, 1, 17, 3] representing
-#         the keypoint coordinates and scores returned from the MoveNet model.
-#         crop_region: A dictionary that defines the coordinates of the bounding box
-#         of the crop region in normalized coordinates (see the init_crop_region
-#         function below for more detail). If provided, this function will also
-#         draw the bounding box on the image.
-#         output_image_height: An integer indicating the height of the output image.
-#         Note that the image aspect ratio will be the same as the input image.
+    x = interpreter.get_tensor(output['index'])
+    scale, zero_point = output['quantization']
+    x = (x.astype(np.float32) - zero_point) * scale  # re-scale
 
-#     Returns:
-#         A numpy array with shape [out_height, out_width, channel] representing the
-#         image overlaid with keypoint predictions.
-#     """
-#     height, width, ch = image.shape
-#     aspect_ratio = float(width) / height
-#     fig, ax = plt.subplots(figsize=(12 * aspect_ratio, 12))
-#     # To remove the huge white borders
-#     fig.tight_layout(pad=0)
-#     ax.margins(0)
-#     ax.set_yticklabels([])
-#     ax.set_xticklabels([])
-#     plt.axis('off')
-
-#     im = ax.imshow(image)
-#     line_segments = LineCollection([], linewidths=(4), linestyle='solid')
-#     ax.add_collection(line_segments)
-#     # Turn off tick labels
-#     scat = ax.scatter([], [], s=60, color='#FF1493', zorder=3)
-
-#     (keypoint_locs, keypoint_edges,
-#     edge_colors) = _keypoints_and_edges_for_display(
-#         keypoints_with_scores, height, width)
-
-#     line_segments.set_segments(keypoint_edges)
-#     line_segments.set_color(edge_colors)
-#     if keypoint_edges.shape[0]:
-#         line_segments.set_segments(keypoint_edges)
-#         line_segments.set_color(edge_colors)
-#     if keypoint_locs.shape[0]:
-#         scat.set_offsets(keypoint_locs)
-
-#     fig.canvas.draw()
-#     image_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-#     image_from_plot = image_from_plot.reshape(
-#         fig.canvas.get_width_height()[::-1] + (3,))
-#     plt.close(fig)
-#     if output_image_height is not None:
-#         output_image_width = int(output_image_height / height * width)
-#         image_from_plot = cv2.resize(
-#             image_from_plot, dsize=(output_image_width, output_image_height),
-#                 interpolation=cv2.INTER_CUBIC)
-#     return image_from_plot
+    return x
