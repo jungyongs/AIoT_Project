@@ -87,6 +87,8 @@ def run(model=ROOT / 'models/ObjectDetection/best-int8.tflite',  # object detect
         
     # Set the videowriter with mp4 codec
     save_dir = Path(save_dir)
+    if not save_dir.exists(): # make the output directory
+        save_dir.mkdir(parents=True)
     if webcam:
         save_path = str(save_dir / 'out.mp4')
     else:
