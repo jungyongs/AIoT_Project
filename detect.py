@@ -152,8 +152,15 @@ def run(model=ROOT / 'models/ObjectDetection/best-int8.tflite',  # object detect
             # Binary img classification for person detection
             if person_check and not person_flag:
                 person = inference_person(interpreter_person, im0)
-                if not person:
-                    break # If not detected, do not proceed
+                if not person: # If not detected, do not proceed
+                    out.write(im0)                    
+                    if stream:
+                        cv2.imshow('teststream', im0)                        
+                    frames -=1        
+                    print(f'frame #: {frames0 - frames}/{frames0}')
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    continue
                 else:
                     person_absence_counter = 0 # Reset the absence counter
                     person_flag = True
