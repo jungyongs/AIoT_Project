@@ -11,5 +11,5 @@ If installing the 'lap' package results in an error, you can either install exce
 
 ### Example to Run
 ```
-python detect.py --source vid.mp4
+python detect.py --source 'video name'.mp4
 ```
