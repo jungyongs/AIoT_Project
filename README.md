@@ -9,4 +9,7 @@ Online datasets used for traning: Fall Detection Dataset(https://www.kaggle.com/
 The program has been implemented and tested in Python 3.8.10.  
 If installing the 'lap' package results in an error, you can either install except the package or manually install it by using the uploaded file.
 
-Usage: python detect.py --source vid.mp4
+Example to Run
+```
+python detect.py --source vid.mp4
+```
